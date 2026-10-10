@@ -1,19 +1,37 @@
 import 'package:flutter/material.dart';
+// import 'package:go_router/go_router.dart';
+// import 'routing/router.dart';
+
+import 'home_feature/home.dart' as home;
+import 'icmp_feature/icmp.dart' as icmp;
 
 void main() {
-  runApp(const HelloWorld());
+  runApp(const App());
 }
 
-class HelloWorld extends StatelessWidget {
-  const HelloWorld({Key? key}) : super(key: key);
+class App extends StatelessWidget {
+  const App({super.key});
 
   @override
   Widget build(BuildContext context) {
     return MaterialApp(
       home: Scaffold(
-        appBar: AppBar(title: const Text("Hello World App")),
-        bottomNavigationBar: Row(spacing: 4, children: [Text("menu")]),
-        body: const SafeArea(child: Center(child: Text("whatttt"))),
+        bottomNavigationBar: DefaultTabController(
+          length: 2,
+          child: Scaffold(
+            appBar: AppBar(
+              bottom: TabBar(
+                tabs: [
+                  Tab(text: "home"),
+                  Tab(text: "icmp"),
+                ],
+              ),
+            ),
+            body: const TabBarView(
+              children: [home.HomeScreen(), icmp.IcmpScreen()],
+            ),
+          ),
+        ),
       ),
     );
   }
