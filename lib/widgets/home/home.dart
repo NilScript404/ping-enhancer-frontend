@@ -112,7 +112,7 @@ class _HomeScreenState extends State<HomeScreen> {
                 _isConnected ? "Connected" : "Connect",
                 key: ValueKey<bool>(_isConnected),
                 style: TextStyle(
-                  color:AppColors.turquoiseBlue,
+                  color:AppColors.blackPearl,
                   fontSize: 14,
                   fontWeight: FontWeight.w600,
                   shadows: _isConnected?[
