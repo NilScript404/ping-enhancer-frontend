@@ -84,5 +84,7 @@ class AppColors {
   ); // #90A1B9 (Bali Hai - Subtitles, inactive tabs, Min/Avg labels)
   static const textPlaceholder = Color(
     0xFF62748E,
-  ); // #62748E (Lynch - Search placeholder)
+  );// #62748E (Lynch - Search placeholder)
+  static const vulcanSheet = Color(0xFF131722); // Added: Bottom sheet background
+  static const mirageButton = Color(0xFF1B2030); // Added: Secondary sheet button bg
 }
