@@ -1,26 +1,109 @@
-import 'package:flutter/material.dart';
 import 'dart:async';
 import 'dart:ui';
+import 'package:dart_ping/dart_ping.dart';
+import 'package:dio/dio.dart';
+import 'package:flutter/material.dart';
+import 'package:wireguard_flutter_plus/wireguard_flutter_plus.dart';
+import '../../theme/app_colors.dart';
 
-// ==========================================
-// 1. EXACT FIGMA COLORS EXTRACTED FROM YOUR CSS
-// ==========================================
-class FigmaColors {
-  static const Color bunker = Color(0xFF0B0E15);
-  static const Color vulcanCard = Color(0xFF121620);
-  static const Color vulcanSheet = Color(0xFF131722);
-  static const Color mirageBorder = Color(0xFF1D293D);
-  static const Color mirageButton = Color(0xFF1B2030);
+class ServerConfig {
+  final int id;
+  final String name;
+  final String location;
+  final String routeAddress;
+  final String routeType;
+  final String value;
+  final int bytesTotal;
+  final int bytesUsed;
+  final int remainingDays;
+  int? pingMs;
+  bool isPinging;
+  bool pingFailed;
 
-  static const Color caribbeanGreen = Color(0xFF00D492);
-  static const Color turquoiseBlue = Color(0xFF5EE9B5);
-  static const Color dodgerBlue = Color(0xFF00BCFF);
+  ServerConfig({
+    required this.id,
+    required this.name,
+    required this.location,
+    required this.routeAddress,
+    required this.routeType,
+    required this.value,
+    required this.bytesTotal,
+    required this.bytesUsed,
+    required this.remainingDays,
+    this.pingMs,
+    this.isPinging = false,
+    this.pingFailed = false,
+  });
 
-  static const Color catskillWhite = Color(0xFFF1F5F9);
-  static const Color mystic = Color(0xFFE2E8F0);
-  static const Color baliHai = Color(0xFF90A1B9);
-  static const Color lynch = Color(0xFF62748E);
-  static const Color fiord = Color(0xFF45556C);
+  bool get isDirect => routeType.toLowerCase() == 'direct';
+  String get displayType => isDirect ? 'Direct' : 'IR Relay';
+
+  String get pingLabel {
+    if (isPinging) return '...';
+    if (pingMs != null) return '$pingMs ms';
+    if (pingFailed) return 'Timeout';
+    return '-- ms';
+  }
+
+  String get wireGuardEndpoint {
+    final match = RegExp(r'Endpoint\s*=\s*([^\s]+)', caseSensitive: false).firstMatch(value);
+    if (match != null && match.group(1) != null) {
+      return match.group(1)!.trim();
+    }
+    return routeAddress.contains(':') ? routeAddress : '$routeAddress:51820';
+  }
+
+  factory ServerConfig.fromJson(Map<String, dynamic> json) {
+    return ServerConfig(
+      id: (json['id'] as num?)?.toInt() ?? 0,
+      name: json['name']?.toString() ?? '',
+      location: json['location']?.toString() ?? '',
+      routeAddress: json['route_address']?.toString() ?? '',
+      routeType: json['route_type']?.toString() ?? 'relay',
+      value: json['value']?.toString() ?? '',
+      bytesTotal: (json['bytes_total'] as num?)?.toInt() ?? 0,
+      bytesUsed: (json['bytes_used'] as num?)?.toInt() ?? 0,
+      remainingDays: (json['remaining_days'] as num?)?.toInt() ?? 0,
+    );
+  }
+}
+
+class GameItem {
+  final String name;
+  final String processName;
+
+  GameItem({
+    required this.name,
+    required this.processName,
+  });
+
+  String get initials {
+    final parts = name.trim().split(RegExp(r'\s+'));
+    if (parts.length >= 2) {
+      return '${parts[0][0]}${parts[1][0]}'.toUpperCase();
+    }
+    return name.length >= 2 ? name.substring(0, 2).toUpperCase() : name.toUpperCase();
+  }
+
+  Color get badgeColor {
+    const palette = [
+      Colors.orange,
+      Colors.pink,
+      Colors.blue,
+      Colors.purple,
+      Colors.lightBlue,
+      Colors.amber,
+      Colors.teal,
+    ];
+    return palette[name.hashCode.abs() % palette.length];
+  }
+
+  factory GameItem.fromJson(Map<String, dynamic> json) {
+    return GameItem(
+      name: json['name']?.toString() ?? '',
+      processName: json['process_name']?.toString() ?? '',
+    );
+  }
 }
 
 class HomeScreen extends StatefulWidget {
@@ -31,26 +114,222 @@ class HomeScreen extends StatefulWidget {
 }
 
 class _HomeScreenState extends State<HomeScreen> {
-  // --- Timer & Connection State ---
+  // TODO: Replace 10.0.2.2 with your PC's LAN IP for a physical phone, or your deployed backend URL
+  final Dio _dio = Dio(
+    BaseOptions(
+      baseUrl: 'http://10.0.2.2:3000',
+      connectTimeout: const Duration(seconds: 8),
+      receiveTimeout: const Duration(seconds: 8),
+    ),
+  );
+
+  final _wireguard = WireGuardFlutter.instance;
+  StreamSubscription<VpnStage>? _vpnStageSub;
+  VpnStage _vpnStage = VpnStage.disconnected;
+  bool _vpnInitialized = false;
+
   Timer? _timer;
   int _secondsElapsed = 0;
-  bool _isConnected = false;
 
-  // --- Servers State ---
-  String _activeServerTab = "All"; // All, Relay, Direct
-  String _selectedServerCode = "TR1"; // Matches a specific server ID
+  String _activeServerTab = "All";
+  int? _selectedServerId;
   bool _isSortActive = false;
+  bool _isPingingAll = false;
+  String _serverSearchQuery = "";
 
-  // --- Games State ---
-  final List _availableGames = [
-  {"id": "PM", "name": "PUBG Mobile", "pkg": "com.tencent.ig", "color": Colors.orange},
-  {"id": "VM", "name": "Valorant Mobile", "pkg": "com.riotgames.valorant", "color": Colors.pink},
-  {"id": "WR", "name": "Wild Rift", "pkg": "com.riotgames.wildrift", "color": Colors.blue},
-  {"id": "GI", "name": "Genshin Impact", "pkg": "com.miHoYo.Genshin", "color": Colors.purple},
-  {"id": "ML", "name": "Mobile Legends", "pkg": "com.mobile.legends", "color": Colors.lightBlue},
-  {"id": "BS", "name": "Brawl Stars", "pkg": "com.supercell.brawlstars", "color": Colors.amber},
-  ];
-  Set<String> _selectedGameIds = {'PM', 'VM', 'WR'}; // Default selected
+  bool _isLoadingData = true;
+  String? _loadError;
+
+  List<ServerConfig> _availableServers = [];
+  List<GameItem> _availableGames = [];
+  Set<String> _selectedGameProcesses = {};
+
+  bool get _isConnected => _vpnStage == VpnStage.connected;
+  bool get _isConnecting =>
+      _vpnStage == VpnStage.connecting ||
+          _vpnStage == VpnStage.preparing ||
+          _vpnStage == VpnStage.authenticating ||
+          _vpnStage == VpnStage.waitingConnection ||
+          _vpnStage == VpnStage.reconnect;
+
+  ServerConfig? get _selectedServer {
+    for (final s in _availableServers) {
+      if (s.id == _selectedServerId) return s;
+    }
+    return null;
+  }
+
+  @override
+  void initState() {
+    super.initState();
+    _initVpn();
+    _fetchBackendData();
+  }
+
+  Future<void> _initVpn() async {
+    try {
+      await _wireguard.initialize(
+        interfaceName: 'wg0',
+        vpnName: 'Ping Enhancer',
+      );
+      _vpnInitialized = true;
+
+      _vpnStageSub = _wireguard.vpnStageSnapshot.listen((stage) {
+        if (!mounted) return;
+        setState(() {
+          _vpnStage = stage;
+        });
+
+        if (stage == VpnStage.connected) {
+          _startTimer();
+        } else if (stage == VpnStage.disconnected ||
+            stage == VpnStage.denied ||
+            stage == VpnStage.noConnection) {
+          _stopTimer();
+        }
+      });
+
+      final currentStage = await _wireguard.stage();
+      if (!mounted) return;
+      setState(() {
+        _vpnStage = currentStage;
+      });
+      if (currentStage == VpnStage.connected) {
+        _startTimer();
+      }
+    } catch (e) {
+      _showSnack('Failed to initialize VPN service: $e');
+    }
+  }
+
+  void _startTimer() {
+    if (_timer != null && _timer!.isActive) return;
+    _secondsElapsed = 0;
+    _timer = Timer.periodic(const Duration(seconds: 1), (_) {
+      if (!mounted) return;
+      setState(() {
+        _secondsElapsed++;
+      });
+    });
+  }
+
+  void _stopTimer() {
+    _timer?.cancel();
+    _timer = null;
+    if (mounted) {
+      setState(() {
+        _secondsElapsed = 0;
+      });
+    }
+  }
+
+  void _showSnack(String message) {
+    if (!mounted) return;
+    ScaffoldMessenger.of(context).showSnackBar(
+      SnackBar(
+        content: Text(message, style: const TextStyle(color: AppColors.textPrimary, fontSize: 12)),
+        backgroundColor: AppColors.vulcanCard,
+        behavior: SnackBarBehavior.floating,
+      ),
+    );
+  }
+
+  Future<void> _fetchBackendData() async {
+    setState(() {
+      _isLoadingData = true;
+      _loadError = null;
+    });
+
+    try {
+      final results = await Future.wait([
+        _dio.get('/api/configs'),
+        _dio.get('/api/games'),
+      ]);
+
+      final rawConfigs = results[0].data as List<dynamic>;
+      final rawGames = results[1].data as List<dynamic>;
+
+      final servers = rawConfigs
+          .map((item) => ServerConfig.fromJson(item as Map<String, dynamic>))
+          .toList();
+
+      final games = rawGames
+          .map((item) => GameItem.fromJson(item as Map<String, dynamic>))
+          .toList();
+
+      if (!mounted) return;
+      setState(() {
+        _availableServers = servers;
+        _availableGames = games;
+        if (_selectedServerId == null && servers.isNotEmpty) {
+          _selectedServerId = servers.first.id;
+        }
+        _isLoadingData = false;
+      });
+
+      _pingAllServers();
+    } catch (_) {
+      if (!mounted) return;
+      setState(() {
+        _isLoadingData = false;
+        _loadError = 'Could not reach backend on port 3000.';
+      });
+    }
+  }
+
+  String _extractHost(String routeAddress) {
+    final cleaned = routeAddress.trim().replaceFirst(RegExp(r'^https?://'), '');
+    return cleaned.split(':').first.split('/').first;
+  }
+
+  Future<void> _pingSingleServer(ServerConfig server) async {
+    final host = _extractHost(server.routeAddress);
+    if (host.isEmpty) {
+      server.pingMs = null;
+      server.pingFailed = true;
+      server.isPinging = false;
+      return;
+    }
+
+    int? measuredMs;
+    try {
+      final ping = Ping(host, count: 1, timeout: 3);
+      await for (final event in ping.stream) {
+        if (event is PingResponse && event.time != null) {
+          measuredMs = event.time!.inMilliseconds;
+          break;
+        }
+      }
+    } catch (_) {
+      measuredMs = null;
+    }
+
+    if (!mounted) return;
+    setState(() {
+      server.pingMs = measuredMs;
+      server.pingFailed = measuredMs == null;
+      server.isPinging = false;
+    });
+  }
+
+  Future<void> _pingAllServers() async {
+    if (_isPingingAll || _availableServers.isEmpty) return;
+
+    setState(() {
+      _isPingingAll = true;
+      for (final server in _availableServers) {
+        server.isPinging = true;
+        server.pingFailed = false;
+      }
+    });
+
+    await Future.wait(_availableServers.map(_pingSingleServer));
+
+    if (!mounted) return;
+    setState(() {
+      _isPingingAll = false;
+    });
+  }
 
   String get _formattedTime {
     final hours = (_secondsElapsed ~/ 3600).toString().padLeft(2, '0');
@@ -59,50 +338,141 @@ class _HomeScreenState extends State<HomeScreen> {
     return '$hours:$minutes:$seconds';
   }
 
-  void _toggleConnection() {
+  Future<void> _connectToSelectedServer() async {
+    if (!_vpnInitialized) {
+      await _initVpn();
+    }
+
+    final server = _selectedServer;
+    if (server == null) {
+      _showSnack('Select a server first.');
+      return;
+    }
+
+    if (server.value.trim().isEmpty) {
+      _showSnack('Selected server has no WireGuard config.');
+      return;
+    }
+
     setState(() {
-      _isConnected = !_isConnected;
-      if (_isConnected) {
-        _secondsElapsed = 0;
-        _timer = Timer.periodic(const Duration(seconds: 1), (timer) {
-          setState(() {
-            _secondsElapsed++;
-          });
-        });
-      } else {
-        _timer?.cancel();
-      }
+      _vpnStage = VpnStage.connecting;
     });
+
+    try {
+      final selectedApps = _selectedGameProcesses.where((p) => p.isNotEmpty).toList();
+
+      await _wireguard.startVpn(
+        serverAddress: server.wireGuardEndpoint,
+        wgQuickConfig: server.value,
+        providerBundleIdentifier: 'com.example.my_app',
+        includedApps: selectedApps.isNotEmpty ? selectedApps : null,
+      );
+    } catch (e) {
+      if (!mounted) return;
+      setState(() {
+        _vpnStage = VpnStage.disconnected;
+      });
+      _showSnack('Connection failed: $e');
+    }
+  }
+
+  Future<void> _disconnectVpn() async {
+    try {
+      await _wireguard.stopVpn();
+    } catch (e) {
+      _showSnack('Disconnect failed: $e');
+    } finally {
+      _stopTimer();
+      if (mounted) {
+        setState(() {
+          _vpnStage = VpnStage.disconnected;
+        });
+      }
+    }
+  }
+
+  Future<void> _toggleConnection() async {
+    if (_isConnecting) return;
+
+    if (_isConnected) {
+      await _disconnectVpn();
+    } else {
+      await _connectToSelectedServer();
+    }
+  }
+
+  Future<void> _selectServer(ServerConfig server) async {
+    if (_selectedServerId == server.id) return;
+
+    final wasConnected = _isConnected;
+    setState(() {
+      _selectedServerId = server.id;
+    });
+
+    if (wasConnected) {
+      await _disconnectVpn();
+      await _connectToSelectedServer();
+    }
   }
 
   @override
   void dispose() {
     _timer?.cancel();
+    _vpnStageSub?.cancel();
     super.dispose();
   }
 
-  // ==========================================
-  // 2. SELECTED GAMES BOTTOM SHEET
-  // ==========================================
+  List<ServerConfig> get _filteredServers {
+    final query = _serverSearchQuery.trim().toLowerCase();
+
+    final filtered = _availableServers.where((server) {
+      bool matchesTab = true;
+      if (_activeServerTab == "Relay") matchesTab = !server.isDirect;
+      if (_activeServerTab == "Direct") matchesTab = server.isDirect;
+
+      bool matchesSearch = query.isEmpty ||
+          server.name.toLowerCase().contains(query) ||
+          server.location.toLowerCase().contains(query) ||
+          server.displayType.toLowerCase().contains(query) ||
+          server.routeAddress.toLowerCase().contains(query);
+
+      return matchesTab && matchesSearch;
+    }).toList();
+
+    if (_isSortActive) {
+      filtered.sort((a, b) {
+        final pingA = a.pingMs ?? 999999;
+        final pingB = b.pingMs ?? 999999;
+        return pingA.compareTo(pingB);
+      });
+    }
+
+    return filtered;
+  }
+
   void _showSelectedGamesSheet() {
-    // We create a temporary set so if the user clicks "Cancel", we don't save the changes.
-    Set<String> tempSelected = Set.from(_selectedGameIds);
+    Set<String> tempSelected = Set.from(_selectedGameProcesses);
+    String gameSearchQuery = "";
 
     showModalBottomSheet(
       context: context,
       isScrollControlled: true,
       backgroundColor: Colors.transparent,
       builder: (context) {
-        // StatefulBuilder allows the bottom sheet to update its own UI (like checkboxes)
-        // without rebuilding the entire screen behind it.
         return StatefulBuilder(
           builder: (BuildContext context, StateSetter setModalState) {
+            final q = gameSearchQuery.trim().toLowerCase();
+            final filteredGames = _availableGames.where((g) {
+              return g.name.toLowerCase().contains(q) ||
+                  g.processName.toLowerCase().contains(q);
+            }).toList();
+
             return BackdropFilter(
               filter: ImageFilter.blur(sigmaX: 8.0, sigmaY: 8.0),
               child: Container(
                 height: MediaQuery.of(context).size.height * 0.85,
                 decoration: const BoxDecoration(
-                  color: FigmaColors.vulcanSheet,
+                  color: AppColors.vulcanSheet,
                   borderRadius: BorderRadius.vertical(top: Radius.circular(28)),
                   boxShadow: [
                     BoxShadow(color: Colors.black26, blurRadius: 50, offset: Offset(0, -12))
@@ -110,30 +480,27 @@ class _HomeScreenState extends State<HomeScreen> {
                 ),
                 child: Column(
                   children: [
-                    // Handle
                     Container(
                       margin: const EdgeInsets.only(top: 12, bottom: 12),
                       width: 32,
                       height: 4,
                       decoration: BoxDecoration(
-                        color: FigmaColors.fiord,
+                        color: AppColors.fiord,
                         borderRadius: BorderRadius.circular(10),
                       ),
                     ),
-
-                    // Header (Selected Games | All | Clear | Close)
                     Padding(
                       padding: const EdgeInsets.symmetric(horizontal: 20, vertical: 8),
                       child: Row(
                         children: [
                           const Text(
                             "Selected Games",
-                            style: TextStyle(color: FigmaColors.catskillWhite, fontSize: 14, fontWeight: FontWeight.w600),
+                            style: TextStyle(color: AppColors.textPrimary, fontSize: 14, fontWeight: FontWeight.w600),
                           ),
                           const Spacer(),
                           _buildSheetHeaderButton("All", onTap: () {
                             setModalState(() {
-                              tempSelected.addAll(_availableGames.map((g) => g['id'] as String));
+                              tempSelected.addAll(_availableGames.map((g) => g.processName));
                             });
                           }),
                           const SizedBox(width: 6),
@@ -150,74 +517,80 @@ class _HomeScreenState extends State<HomeScreen> {
                               height: 32,
                               decoration: BoxDecoration(
                                 shape: BoxShape.circle,
-                                border: Border.all(color: FigmaColors.baliHai.withOpacity(0.3)),
+                                border: Border.all(color: AppColors.textMuted.withValues(alpha: 0.3)),
                               ),
-                              child: const Icon(Icons.close, size: 16, color: FigmaColors.baliHai),
+                              child: const Icon(Icons.close, size: 16, color: AppColors.textMuted),
                             ),
                           ),
                         ],
                       ),
                     ),
-
-                    // Search Bar
                     Padding(
                       padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 12),
                       child: Container(
                         height: 38,
                         decoration: BoxDecoration(
-                          color: FigmaColors.bunker,
+                          color: AppColors.bunkerBg,
                           borderRadius: BorderRadius.circular(20),
-                          border: Border.all(color: FigmaColors.mirageBorder),
+                          border: Border.all(color: AppColors.mirageBorder80),
                         ),
                         child: TextField(
-                          style: const TextStyle(color: FigmaColors.catskillWhite, fontSize: 12),
-                          decoration: InputDecoration(
+                          onChanged: (val) {
+                            setModalState(() {
+                              gameSearchQuery = val;
+                            });
+                          },
+                          style: const TextStyle(color: AppColors.textPrimary, fontSize: 12),
+                          decoration: const InputDecoration(
                             hintText: "Search game name or process ID...",
-                            hintStyle: const TextStyle(color: FigmaColors.lynch, fontSize: 12),
-                            prefixIcon: const Icon(Icons.search, color: FigmaColors.baliHai, size: 16),
+                            hintStyle: TextStyle(color: AppColors.textPlaceholder, fontSize: 12),
+                            prefixIcon: Icon(Icons.search, color: AppColors.textMuted, size: 16),
                             border: InputBorder.none,
-                            contentPadding: const EdgeInsets.symmetric(vertical: 12),
+                            contentPadding: EdgeInsets.symmetric(vertical: 12),
                           ),
                         ),
                       ),
                     ),
-
-                    // Games List
                     Expanded(
-                      child: ListView.builder(
+                      child: filteredGames.isEmpty
+                          ? const Center(
+                        child: Text(
+                          "No games found.",
+                          style: TextStyle(color: AppColors.textMuted, fontSize: 12),
+                        ),
+                      )
+                          : ListView.builder(
                         padding: const EdgeInsets.symmetric(horizontal: 16),
                         physics: const BouncingScrollPhysics(),
-                        itemCount: _availableGames.length,
+                        itemCount: filteredGames.length,
                         itemBuilder: (context, index) {
-                          final game = _availableGames[index];
-                          final isSelected = tempSelected.contains(game['id']);
+                          final game = filteredGames[index];
+                          final isSelected = tempSelected.contains(game.processName);
 
                           return _buildGameItem(
-                              game['id'],
-                              game['name'],
-                              game['pkg'],
-                              game['color'],
-                              isSelected: isSelected,
-                              onTap: () {
-                                setModalState(() {
-                                  if (isSelected) {
-                                    tempSelected.remove(game['id']);
-                                  } else {
-                                    tempSelected.add(game['id']);
-                                  }
-                                });
-                              }
+                            game.initials,
+                            game.name,
+                            game.processName,
+                            game.badgeColor,
+                            isSelected: isSelected,
+                            onTap: () {
+                              setModalState(() {
+                                if (isSelected) {
+                                  tempSelected.remove(game.processName);
+                                } else {
+                                  tempSelected.add(game.processName);
+                                }
+                              });
+                            },
                           );
                         },
                       ),
                     ),
-
-                    // Footer Buttons (Cancel / Confirm)
                     Container(
                       padding: const EdgeInsets.symmetric(horizontal: 20, vertical: 14),
                       decoration: const BoxDecoration(
-                        color: Color(0xFF0E111A),
-                        border: Border(top: BorderSide(color: FigmaColors.mirageBorder)),
+                        color: AppColors.vulcanInnerCard,
+                        border: Border(top: BorderSide(color: AppColors.mirageBorder80)),
                       ),
                       child: Row(
                         children: [
@@ -227,34 +600,38 @@ class _HomeScreenState extends State<HomeScreen> {
                               height: 42,
                               width: 72,
                               decoration: BoxDecoration(
-                                color: FigmaColors.mirageButton,
+                                color: AppColors.mirageButton,
                                 borderRadius: BorderRadius.circular(24),
                               ),
                               child: const Center(
-                                child: Text("Cancel", style: TextStyle(color: FigmaColors.catskillWhite, fontSize: 12)),
+                                child: Text("Cancel", style: TextStyle(color: AppColors.textPrimary, fontSize: 12)),
                               ),
                             ),
                           ),
                           const SizedBox(width: 10),
                           Expanded(
                             child: GestureDetector(
-                              onTap: () {
-                                // Save the temporary selection to the main state and close
+                              onTap: () async {
+                                final wasConnected = _isConnected;
                                 setState(() {
-                                  _selectedGameIds = tempSelected;
+                                  _selectedGameProcesses = tempSelected;
                                 });
                                 Navigator.pop(context);
+                                if (wasConnected) {
+                                  await _disconnectVpn();
+                                  await _connectToSelectedServer();
+                                }
                               },
                               child: Container(
                                 height: 42,
                                 decoration: BoxDecoration(
-                                  color: FigmaColors.caribbeanGreen,
+                                  color: AppColors.caribbeanGreen,
                                   borderRadius: BorderRadius.circular(24),
                                 ),
                                 child: Center(
                                   child: Text(
                                     "Confirm Selected Games (${tempSelected.length})",
-                                    style: const TextStyle(color: Colors.black, fontSize: 12, fontWeight: FontWeight.bold),
+                                    style: const TextStyle(color: AppColors.blackPearl, fontSize: 12, fontWeight: FontWeight.bold),
                                   ),
                                 ),
                               ),
@@ -273,13 +650,10 @@ class _HomeScreenState extends State<HomeScreen> {
     );
   }
 
-  // ==========================================
-  // 3. MAIN BUILD METHOD
-  // ==========================================
   @override
   Widget build(BuildContext context) {
     return Scaffold(
-      backgroundColor: FigmaColors.bunker,
+      backgroundColor: AppColors.bunkerBg,
       body: SafeArea(
         child: ListView(
           padding: const EdgeInsets.fromLTRB(14, 16, 14, 16),
@@ -296,18 +670,20 @@ class _HomeScreenState extends State<HomeScreen> {
     );
   }
 
-  // ==========================================
-  // WIDGET BUILDERS
-  // ==========================================
-
   Widget _buildConnectionStatusCard() {
+    final statusText = _isConnecting
+        ? "Connecting..."
+        : _isConnected
+        ? "Connected"
+        : "Connect";
+
     return Container(
       height: 195,
       padding: const EdgeInsets.all(16),
       decoration: BoxDecoration(
-        color: FigmaColors.vulcanCard,
+        color: AppColors.vulcanCard,
         borderRadius: BorderRadius.circular(24),
-        border: Border.all(color: FigmaColors.mirageBorder),
+        border: Border.all(color: AppColors.mirageBorder80),
       ),
       child: Center(
         child: GestureDetector(
@@ -318,33 +694,45 @@ class _HomeScreenState extends State<HomeScreen> {
             width: 112,
             height: 112,
             decoration: BoxDecoration(
-              color: FigmaColors.caribbeanGreen.withOpacity(0.1),
+              color: AppColors.jade10,
               shape: BoxShape.circle,
               border: Border.all(
-                color: FigmaColors.caribbeanGreen,
+                color: _isConnecting ? AppColors.sunglowYellow : AppColors.caribbeanGreen,
                 width: 2.0,
               ),
-              boxShadow: _isConnected ? [
+              boxShadow: _isConnected
+                  ? const [
                 BoxShadow(
-                  color: FigmaColors.caribbeanGreen.withOpacity(0.35),
+                  color: AppColors.jade35,
                   blurRadius: 32,
                   spreadRadius: -8,
                 ),
-              ] : [],
+              ]
+                  : [],
             ),
             child: Column(
               mainAxisAlignment: MainAxisAlignment.center,
               children: [
-                Icon(
-                  Icons.power_settings_new,
-                  color: FigmaColors.caribbeanGreen,
-                  size: 28,
-                ),
+                if (_isConnecting)
+                  const SizedBox(
+                    width: 24,
+                    height: 24,
+                    child: CircularProgressIndicator(
+                      strokeWidth: 2.5,
+                      color: AppColors.sunglowYellow,
+                    ),
+                  )
+                else
+                  const Icon(
+                    Icons.power_settings_new,
+                    color: AppColors.caribbeanGreen,
+                    size: 28,
+                  ),
                 const SizedBox(height: 4),
                 Text(
-                  _isConnected ? "Connected" : "Connect",
-                  style: const TextStyle(
-                    color: FigmaColors.turquoiseBlue,
+                  statusText,
+                  style: TextStyle(
+                    color: _isConnecting ? AppColors.sunglowYellow : AppColors.turquoiseBlue,
                     fontSize: 12,
                     fontWeight: FontWeight.w600,
                   ),
@@ -355,7 +743,7 @@ class _HomeScreenState extends State<HomeScreen> {
                     child: Text(
                       _formattedTime,
                       style: const TextStyle(
-                        color: FigmaColors.baliHai,
+                        color: AppColors.textMuted,
                         fontSize: 10,
                         fontFamily: 'monospace',
                       ),
@@ -370,19 +758,18 @@ class _HomeScreenState extends State<HomeScreen> {
   }
 
   Widget _buildSelectedGamesSummaryCard() {
-    // Generate the summary string (e.g. "PUBG Mobile, Valorant Mobile...")
     final selectedNames = _availableGames
-        .where((g) => _selectedGameIds.contains(g['id']))
-        .map((g) => g['name'])
+        .where((g) => _selectedGameProcesses.contains(g.processName))
+        .map((g) => g.name)
         .join(", ");
 
     return Container(
       height: 66,
       padding: const EdgeInsets.symmetric(horizontal: 14),
       decoration: BoxDecoration(
-        color: FigmaColors.vulcanCard,
+        color: AppColors.vulcanCard,
         borderRadius: BorderRadius.circular(16),
-        border: Border.all(color: FigmaColors.mirageBorder),
+        border: Border.all(color: AppColors.mirageBorder80),
       ),
       child: Row(
         children: [
@@ -390,11 +777,11 @@ class _HomeScreenState extends State<HomeScreen> {
             width: 36,
             height: 36,
             decoration: BoxDecoration(
-              color: FigmaColors.caribbeanGreen.withOpacity(0.1),
+              color: AppColors.jade10,
               borderRadius: BorderRadius.circular(12),
-              border: Border.all(color: FigmaColors.caribbeanGreen.withOpacity(0.3)),
+              border: Border.all(color: AppColors.caribbeanGreen.withValues(alpha: 0.3)),
             ),
-            child: const Icon(Icons.gamepad, color: FigmaColors.caribbeanGreen, size: 18),
+            child: const Icon(Icons.gamepad, color: AppColors.caribbeanGreen, size: 18),
           ),
           const SizedBox(width: 12),
           Expanded(
@@ -403,12 +790,12 @@ class _HomeScreenState extends State<HomeScreen> {
               crossAxisAlignment: CrossAxisAlignment.start,
               children: [
                 Text(
-                  "Selected Games (${_selectedGameIds.length})",
-                  style: const TextStyle(color: FigmaColors.catskillWhite, fontSize: 12, fontWeight: FontWeight.bold),
+                  "Selected Games (${_selectedGameProcesses.length})",
+                  style: const TextStyle(color: AppColors.textPrimary, fontSize: 12, fontWeight: FontWeight.bold),
                 ),
                 Text(
-                  selectedNames.isEmpty ? "No games selected" : selectedNames,
-                  style: const TextStyle(color: FigmaColors.baliHai, fontSize: 11),
+                  selectedNames.isEmpty ? "All traffic (no games selected)" : selectedNames,
+                  style: const TextStyle(color: AppColors.textMuted, fontSize: 11),
                   overflow: TextOverflow.ellipsis,
                 ),
               ],
@@ -416,11 +803,11 @@ class _HomeScreenState extends State<HomeScreen> {
           ),
           GestureDetector(
             onTap: _showSelectedGamesSheet,
-            child: Row(
+            child: const Row(
               children: [
-                const Text("Select", style: TextStyle(color: FigmaColors.caribbeanGreen, fontSize: 12, fontWeight: FontWeight.w500)),
-                const SizedBox(width: 4),
-                const Icon(Icons.chevron_right, color: FigmaColors.caribbeanGreen, size: 16),
+                Text("Select", style: TextStyle(color: AppColors.caribbeanGreen, fontSize: 12, fontWeight: FontWeight.w500)),
+                SizedBox(width: 4),
+                Icon(Icons.chevron_right, color: AppColors.caribbeanGreen, size: 16),
               ],
             ),
           )
@@ -430,23 +817,24 @@ class _HomeScreenState extends State<HomeScreen> {
   }
 
   Widget _buildServersListCard() {
+    final servers = _filteredServers;
+
     return Container(
       padding: const EdgeInsets.all(14),
       decoration: BoxDecoration(
-        color: FigmaColors.vulcanCard,
+        color: AppColors.vulcanCard,
         borderRadius: BorderRadius.circular(24),
-        border: Border.all(color: FigmaColors.mirageBorder),
+        border: Border.all(color: AppColors.mirageBorder80),
       ),
       child: Column(
         children: [
-          // --- Tabs ---
           Container(
             height: 42,
             padding: const EdgeInsets.all(4),
             decoration: BoxDecoration(
-              color: FigmaColors.bunker,
+              color: AppColors.bunkerBg,
               borderRadius: BorderRadius.circular(30),
-              border: Border.all(color: FigmaColors.mirageBorder),
+              border: Border.all(color: AppColors.mirageBorder80),
             ),
             child: Row(
               children: [
@@ -457,71 +845,95 @@ class _HomeScreenState extends State<HomeScreen> {
             ),
           ),
           const SizedBox(height: 10),
-
-          // --- Search & Filters Row ---
           Row(
             children: [
               Expanded(
                 child: Container(
                   height: 34,
                   decoration: BoxDecoration(
-                    color: FigmaColors.bunker,
+                    color: AppColors.bunkerBg,
                     borderRadius: BorderRadius.circular(20),
-                    border: Border.all(color: FigmaColors.mirageBorder),
+                    border: Border.all(color: AppColors.mirageBorder80),
                   ),
                   child: TextField(
-                    style: const TextStyle(color: FigmaColors.catskillWhite, fontSize: 12),
-                    decoration: InputDecoration(
+                    onChanged: (val) {
+                      setState(() {
+                        _serverSearchQuery = val;
+                      });
+                    },
+                    style: const TextStyle(color: AppColors.textPrimary, fontSize: 12),
+                    decoration: const InputDecoration(
                       hintText: "Search server...",
-                      hintStyle: const TextStyle(color: FigmaColors.lynch, fontSize: 12),
-                      prefixIcon: const Icon(Icons.search, color: FigmaColors.baliHai, size: 14),
+                      hintStyle: TextStyle(color: AppColors.textPlaceholder, fontSize: 12),
+                      prefixIcon: Icon(Icons.search, color: AppColors.textMuted, size: 14),
                       border: InputBorder.none,
-                      contentPadding: const EdgeInsets.symmetric(vertical: 10),
+                      contentPadding: EdgeInsets.symmetric(vertical: 10),
                     ),
                   ),
                 ),
               ),
               const SizedBox(width: 6),
-
-              // Sort Button
               GestureDetector(
                 onTap: () => setState(() => _isSortActive = !_isSortActive),
                 child: Container(
                   height: 34,
                   padding: const EdgeInsets.symmetric(horizontal: 10),
                   decoration: BoxDecoration(
-                    color: _isSortActive ? FigmaColors.mirageBorder : FigmaColors.bunker,
+                    color: _isSortActive ? AppColors.jade15 : AppColors.bunkerBg,
                     borderRadius: BorderRadius.circular(20),
-                    border: Border.all(color: FigmaColors.mirageBorder),
+                    border: Border.all(
+                      color: _isSortActive ? AppColors.caribbeanGreen50 : AppColors.mirageBorder80,
+                    ),
                   ),
                   child: Row(
                     children: [
-                      Icon(Icons.sort, color: _isSortActive ? FigmaColors.catskillWhite : FigmaColors.baliHai, size: 14),
+                      Icon(
+                        Icons.sort,
+                        color: _isSortActive ? AppColors.turquoiseBlue : AppColors.textMuted,
+                        size: 14,
+                      ),
                       const SizedBox(width: 4),
-                      Text("Sort", style: TextStyle(color: _isSortActive ? FigmaColors.catskillWhite : FigmaColors.baliHai, fontSize: 11)),
+                      Text(
+                        "Sort",
+                        style: TextStyle(
+                          color: _isSortActive ? AppColors.turquoiseBlue : AppColors.textMuted,
+                          fontSize: 11,
+                        ),
+                      ),
                     ],
                   ),
                 ),
               ),
               const SizedBox(width: 6),
-
-              // Ping Button
               GestureDetector(
-                onTap: () {
-                  // Add visual pinging logic here if needed
-                },
+                onTap: _isPingingAll ? null : _pingAllServers,
                 child: Container(
                   height: 34,
                   padding: const EdgeInsets.symmetric(horizontal: 10),
                   decoration: BoxDecoration(
-                    color: FigmaColors.caribbeanGreen,
+                    color: _isPingingAll
+                        ? AppColors.caribbeanGreen.withValues(alpha: 0.6)
+                        : AppColors.caribbeanGreen,
                     borderRadius: BorderRadius.circular(20),
                   ),
                   child: Row(
                     children: [
-                      const Icon(Icons.speed, color: Colors.black, size: 14),
+                      if (_isPingingAll)
+                        const SizedBox(
+                          width: 12,
+                          height: 12,
+                          child: CircularProgressIndicator(
+                            strokeWidth: 2,
+                            color: AppColors.blackPearl,
+                          ),
+                        )
+                      else
+                        const Icon(Icons.speed, color: AppColors.blackPearl, size: 14),
                       const SizedBox(width: 4),
-                      const Text("Ping", style: TextStyle(color: Colors.black, fontSize: 11, fontWeight: FontWeight.bold)),
+                      Text(
+                        _isPingingAll ? "Pinging" : "Ping",
+                        style: const TextStyle(color: AppColors.blackPearl, fontSize: 11, fontWeight: FontWeight.bold),
+                      ),
                     ],
                   ),
                 ),
@@ -529,47 +941,77 @@ class _HomeScreenState extends State<HomeScreen> {
             ],
           ),
           const SizedBox(height: 14),
-
-          // --- Servers List ---
-          Column(
-            children: [
-              _buildServerItem("TR1", "TR", "Istanbul 01", "24 ms", "IR Relay"),
-              const Divider(color: FigmaColors.mirageBorder, height: 1),
-              _buildServerItem("TR2", "TR", "Istanbul 01", "49 ms", "Direct", isDirect: true),
-              const Divider(color: FigmaColors.mirageBorder, height: 1),
-              _buildServerItem("DE1", "DE", "Frankfurt 01", "36 ms", "IR Relay"),
-              const Divider(color: FigmaColors.mirageBorder, height: 1),
-              _buildServerItem("DE2", "DE", "Frankfurt 01", "68 ms", "Direct", isDirect: true),
-              const Divider(color: FigmaColors.mirageBorder, height: 1),
-              _buildServerItem("NL1", "NL", "Amsterdam 01", "39 ms", "IR Relay"),
-            ],
-          )
+          if (_isLoadingData)
+            const Padding(
+              padding: EdgeInsets.symmetric(vertical: 28),
+              child: Center(
+                child: CircularProgressIndicator(color: AppColors.caribbeanGreen, strokeWidth: 2),
+              ),
+            )
+          else if (_loadError != null)
+            Padding(
+              padding: const EdgeInsets.symmetric(vertical: 20),
+              child: Column(
+                children: [
+                  Text(_loadError!, style: const TextStyle(color: AppColors.watermelonRed, fontSize: 12)),
+                  const SizedBox(height: 10),
+                  GestureDetector(
+                    onTap: _fetchBackendData,
+                    child: Container(
+                      padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 8),
+                      decoration: BoxDecoration(
+                        color: AppColors.mirageButton,
+                        borderRadius: BorderRadius.circular(16),
+                      ),
+                      child: const Text("Retry", style: TextStyle(color: AppColors.textPrimary, fontSize: 12)),
+                    ),
+                  ),
+                ],
+              ),
+            )
+          else if (servers.isEmpty)
+              const Padding(
+                padding: EdgeInsets.symmetric(vertical: 20),
+                child: Center(
+                  child: Text("No servers match your search or filter.", style: TextStyle(color: AppColors.textMuted, fontSize: 12)),
+                ),
+              )
+            else
+              Column(
+                children: servers.asMap().entries.map((entry) {
+                  final index = entry.key;
+                  final server = entry.value;
+                  return Column(
+                    children: [
+                      _buildServerItem(server),
+                      if (index < servers.length - 1)
+                        const Divider(color: AppColors.mirageBorder80, height: 1),
+                    ],
+                  );
+                }).toList(),
+              ),
         ],
       ),
     );
   }
 
-  // ==========================================
-  // REUSABLE UI BUILDERS
-  // ==========================================
-
   Widget _buildServerTab(String title) {
-    bool isActive = _activeServerTab == title;
+    final isActive = _activeServerTab == title;
     return Expanded(
       child: GestureDetector(
         onTap: () => setState(() => _activeServerTab = title),
         child: Container(
           decoration: BoxDecoration(
-            color: isActive ? FigmaColors.caribbeanGreen : Colors.transparent,
+            color: isActive ? AppColors.caribbeanGreen : Colors.transparent,
             borderRadius: BorderRadius.circular(30),
           ),
           child: Center(
             child: Text(
               title,
               style: TextStyle(
-                  color: isActive ? Colors.black : FigmaColors.baliHai,
-                  fontSize: 12,
-                  fontWeight: isActive ? FontWeight.bold : FontWeight.normal
+                color: isActive ? AppColors.blackPearl : AppColors.textMuted,
+                fontSize: 12,
+                fontWeight: isActive ? FontWeight.bold : FontWeight.normal,
               ),
             ),
           ),
@@ -585,23 +1027,30 @@ class _HomeScreenState extends State<HomeScreen> {
         height: 32,
         padding: const EdgeInsets.symmetric(horizontal: 12),
         decoration: BoxDecoration(
-          color: FigmaColors.mirageButton,
+          color: AppColors.mirageButton,
           borderRadius: BorderRadius.circular(20),
         ),
         child: Row(
           children: [
             if (icon != null) ...[
-              Icon(icon, size: 14, color: FigmaColors.baliHai),
+              Icon(icon, size: 14, color: AppColors.textMuted),
               const SizedBox(width: 4),
             ],
-            Text(text, style: const TextStyle(color: FigmaColors.catskillWhite, fontSize: 12)),
+            Text(text, style: const TextStyle(color: AppColors.textPrimary, fontSize: 12)),
           ],
         ),
       ),
     );
   }
 
-  Widget _buildGameItem(String initials, String title, String package, Color iconColor, {required bool isSelected, required VoidCallback onTap}) {
+  Widget _buildGameItem(
+      String initials,
+      String title,
+      String package,
+      Color iconColor, {
+        required bool isSelected,
+        required VoidCallback onTap,
+      }) {
     return GestureDetector(
       onTap: onTap,
       behavior: HitTestBehavior.opaque,
@@ -619,7 +1068,7 @@ class _HomeScreenState extends State<HomeScreen> {
               width: 36,
               height: 36,
               decoration: BoxDecoration(
-                color: iconColor.withOpacity(0.1),
+                color: iconColor.withValues(alpha: 0.1),
                 borderRadius: BorderRadius.circular(12),
               ),
               child: Center(
@@ -635,21 +1084,20 @@ class _HomeScreenState extends State<HomeScreen> {
                 mainAxisAlignment: MainAxisAlignment.center,
                 crossAxisAlignment: CrossAxisAlignment.start,
                 children: [
-                  Text(title, style: const TextStyle(color: FigmaColors.catskillWhite, fontSize: 12, fontWeight: FontWeight.w600)),
-                  Text(package, style: const TextStyle(color: FigmaColors.lynch, fontSize: 11)),
+                  Text(title, style: const TextStyle(color: AppColors.textPrimary, fontSize: 12, fontWeight: FontWeight.w600)),
+                  Text(package, style: const TextStyle(color: AppColors.textPlaceholder, fontSize: 11)),
                 ],
               ),
             ),
-            // Checkbox
             Container(
               width: 20,
               height: 20,
               decoration: BoxDecoration(
-                color: isSelected ? FigmaColors.caribbeanGreen : Colors.transparent,
+                color: isSelected ? AppColors.caribbeanGreen : Colors.transparent,
                 shape: BoxShape.circle,
-                border: Border.all(color: isSelected ? FigmaColors.caribbeanGreen : FigmaColors.fiord),
+                border: Border.all(color: isSelected ? AppColors.caribbeanGreen : AppColors.fiord),
               ),
-              child: isSelected ? const Icon(Icons.check, color: FigmaColors.bunker, size: 14) : null,
+              child: isSelected ? const Icon(Icons.check, color: AppColors.bunkerBg, size: 14) : null,
             )
           ],
         ),
@@ -657,17 +1105,17 @@ class _HomeScreenState extends State<HomeScreen> {
     );
   }
 
-  Widget _buildServerItem(String id, String code, String name, String ping, String type, {bool isDirect = false}) {
-    bool isSelected = _selectedServerCode == id;
+  Widget _buildServerItem(ServerConfig server) {
+    final isSelected = _selectedServerId == server.id;
 
     return GestureDetector(
-      onTap: () => setState(() => _selectedServerCode = id),
+      onTap: () => _selectServer(server),
       behavior: HitTestBehavior.opaque,
       child: Container(
         height: 57,
         padding: const EdgeInsets.symmetric(horizontal: 10),
         decoration: BoxDecoration(
-          color: isSelected ? FigmaColors.caribbeanGreen.withOpacity(0.1) : Colors.transparent,
+          color: isSelected ? AppColors.jade10 : Colors.transparent,
           borderRadius: BorderRadius.circular(16),
         ),
         child: Row(
@@ -676,40 +1124,59 @@ class _HomeScreenState extends State<HomeScreen> {
               width: 36,
               height: 36,
               decoration: BoxDecoration(
-                color: isSelected ? FigmaColors.caribbeanGreen.withOpacity(0.2) : FigmaColors.bunker,
-                border: Border.all(color: isSelected ? FigmaColors.caribbeanGreen.withOpacity(0.5) : FigmaColors.mirageBorder),
+                color: isSelected ? AppColors.caribbeanGreen20 : AppColors.bunkerBg,
+                border: Border.all(color: isSelected ? AppColors.caribbeanGreen50 : AppColors.mirageBorder80),
                 borderRadius: BorderRadius.circular(12),
               ),
               child: Center(
                 child: Text(
-                  code,
-                  style: TextStyle(color: isSelected ? FigmaColors.turquoiseBlue : FigmaColors.baliHai, fontSize: 12, fontWeight: FontWeight.bold),
+                  server.location,
+                  style: TextStyle(
+                    color: isSelected ? AppColors.turquoiseBlue : AppColors.textMuted,
+                    fontSize: 12,
+                    fontWeight: FontWeight.bold,
+                  ),
                 ),
               ),
             ),
             const SizedBox(width: 12),
             Expanded(
-              child: Text(name, style: const TextStyle(color: FigmaColors.catskillWhite, fontSize: 12, fontWeight: FontWeight.w600)),
+              child: Text(
+                server.name,
+                style: const TextStyle(color: AppColors.textPrimary, fontSize: 12, fontWeight: FontWeight.w600),
+              ),
             ),
             Column(
               mainAxisAlignment: MainAxisAlignment.center,
               crossAxisAlignment: CrossAxisAlignment.end,
               children: [
-                Text(ping, style: const TextStyle(color: FigmaColors.catskillWhite, fontSize: 12, fontWeight: FontWeight.bold)),
-                Text(type, style: TextStyle(color: isDirect ? FigmaColors.dodgerBlue : FigmaColors.caribbeanGreen, fontSize: 10)),
+                Text(
+                  server.pingLabel,
+                  style: TextStyle(
+                    color: server.pingFailed ? AppColors.watermelonRed : AppColors.textPrimary,
+                    fontSize: 12,
+                    fontWeight: FontWeight.bold,
+                  ),
+                ),
+                Text(
+                  server.displayType,
+                  style: TextStyle(
+                    color: server.isDirect ? AppColors.dodgerBlue : AppColors.caribbeanGreen,
+                    fontSize: 10,
+                  ),
+                ),
               ],
             ),
             const SizedBox(width: 12),
-            // Check circle
             Container(
               width: 20,
               height: 20,
               decoration: BoxDecoration(
-                color: isSelected ? FigmaColors.caribbeanGreen : Colors.transparent,
+                color: isSelected ? AppColors.caribbeanGreen : Colors.transparent,
                 shape: BoxShape.circle,
-                border: Border.all(color: isSelected ? FigmaColors.caribbeanGreen : FigmaColors.fiord),
+                border: Border.all(color: isSelected ? AppColors.caribbeanGreen : AppColors.fiord),
               ),
-              child: isSelected ? const Icon(Icons.check, size: 14, color: FigmaColors.bunker) : null,
+              child: isSelected ? const Icon(Icons.check, size: 14, color: AppColors.bunkerBg) : null,
             )
           ],
         ),
