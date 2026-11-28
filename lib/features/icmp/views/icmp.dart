@@ -1,6 +1,16 @@
 import 'package:flutter/material.dart';
-import 'package:dio/dio.dart';
-import 'package:dart_ping/dart_ping.dart';
+import 'package:provider/provider.dart';
+
+import 'package:my_app/core/theme/app_colors.dart';
+import 'package:my_app/core/theme/app_theme.dart';
+
+import 'package:my_app/features/icmp/models/ping_target.dart';
+import 'package:my_app/features/icmp/repositories/icmp_repository.dart';
+import 'package:my_app/features/icmp/services/icmp_api_service.dart';
+import 'package:my_app/features/icmp/services/icmp_ping_service.dart';
+import 'package:my_app/features/icmp/viewmodels/icmp_view_model.dart';
+
+
 abstract final class _Palette {
   static const Color bunker = Color(0xFF0B0E15);
   static const Color shell = Color(0xFF1A1F2C);
@@ -29,261 +39,65 @@ abstract final class _Palette {
   static const Color relayIconBorder = Color(0x8000D492);
 }
 
-enum _PingFilter { all, relay, direct }
-enum _SortMetric { avg, min, loss }
 
-class _PingTarget {
-  const _PingTarget({
-    required this.countryCode,
-    required this.name,
-    required this.type,
-    required this.routeAddress,
-    required this.min,
-    required this.avg,
-    required this.max,
-    required this.loss,
-  });
-
-  final String countryCode;
-  final String name;
-  final String type;
-  final String routeAddress;
-
-  final int min;
-  final int avg;
-  final int max;
-  final int loss;
-
-  bool get isRelay => type.toLowerCase().contains('relay');
-
-  _PingTarget copyWith({
-    int? min,
-    int? avg,
-    int? max,
-    int? loss,
-  }) {
-    return _PingTarget(
-      countryCode: countryCode,
-      name: name,
-      type: type,
-      routeAddress: routeAddress,
-      min: min ?? this.min,
-      avg: avg ?? this.avg,
-      max: max ?? this.max,
-      loss: loss ?? this.loss,
-    );
-  }
-}
 
 /// ICMP page content only.
 ///
 /// This widget is designed to be used inside the application's existing
 /// Scaffold, AppBar/TopBar and bottomNavigationBar. It deliberately does not
 /// create a MaterialApp, Scaffold, top bar, status bar or navigation bar.
-class IcmpScreen extends StatefulWidget {
+class IcmpScreen extends StatelessWidget {
   const IcmpScreen({super.key});
 
   @override
-  State<IcmpScreen> createState() => _IcmpScreenState();
+  Widget build(BuildContext context) {
+    return ChangeNotifierProvider(
+      create: (_) {
+        final repository = IcmpRepository(
+          apiService: IcmpApiService(),
+          pingService: IcmpPingService(),
+        );
+
+        return IcmpViewModel(repository: repository)..fetchTargets();
+      },
+      child: const _IcmpScreenContent(),
+    );
+  }
 }
 
-class _IcmpScreenState extends State<IcmpScreen> {
+class _IcmpScreenContent extends StatelessWidget {
+  const _IcmpScreenContent();
 
-  // API Client
-  final Dio _dio = Dio(
-    BaseOptions(
-      baseUrl: 'http://10.0.2.2:3000',
-      connectTimeout: const Duration(seconds: 10),
-      receiveTimeout: const Duration(seconds: 15),
-      headers: {
-        'Content-Type': 'application/json',
-      },
-    ),
-  );
+  Future<void> _startIcmpTest(
+      BuildContext context,
+      IcmpViewModel vm,
+      ) async {
+    if (vm.isTestingIcmp) return;
 
-// Server List
-  List<_PingTarget> _targets = [];
-
-// Loading States
-  bool _isLoadingTargets = false;
-  bool _isTestingIcmp = false;
-
-  String? _targetsError;
-
-
-// Fetch Servers from Go Backend
-  Future<void> _fetchTargets() async {
-    setState(() {
-      _isLoadingTargets = true;
-      _targetsError = null;
-    });
-
-    try {
-      final response = await _dio.get('/api/configs');
-
-      final List<dynamic> data = response.data;
-
-      final List<_PingTarget> targets = data.map((item) {
-        final json = Map<String, dynamic>.from(item);
-
-        return _PingTarget(
-          countryCode: json['location']?.toString() ?? '',
-          name: json['name']?.toString() ?? '',
-          type: json['route_type']?.toString() ?? '',
-          routeAddress: json['route_address']?.toString() ?? '',
-          min: 0,
-          avg: 0,
-          max: 0,
-          loss: 0,
-        );
-      }).toList();
-
-      if (!mounted) return;
-
-      setState(() {
-        _targets = targets;
-        _isLoadingTargets = false;
-      });
-
-    } catch (e) {
-      if (!mounted) return;
-
-      setState(() {
-        _targetsError = e.toString();
-        _isLoadingTargets = false;
-      });
-
-      debugPrint('API Error: $e');
-    }
-  }
-
-
-// ICMP Test for One Server
-  Future<PingSummary> _pingServer(String address) async {
-    final host = address.trim();
-
-    if (host.isEmpty) {
-      throw ArgumentError('Server route address is empty');
-    }
-
-    final ping = Ping(
-      host,
-      count: 5,
-      interval: 1,
-      timeout: 2,
-    );
-
-    PingSummary? summary;
-
-    await for (final event in ping.stream) {
-      if (event is PingSummary) {
-        summary = event;
-      }
-    }
-
-    if (summary == null) {
-      throw Exception('No ICMP summary received for $host');
-    }
-
-    return summary;
-  }
-
-
-// Update One Server's Ping Information
-  Future<void> _testTarget(_PingTarget target) async {
-    try {
-      final result = await _pingServer(target.routeAddress);
-
-      final stats = result.stats;
-
-      if (!mounted) return;
-
-      setState(() {
-        final index = _targets.indexWhere(
-              (item) => item.routeAddress == target.routeAddress,
-        );
-
-        if (index == -1) return;
-
-        _targets[index] = _targets[index].copyWith(
-          min: stats?.min?.inMilliseconds ?? 0,
-          avg: stats?.avg?.inMilliseconds ?? 0,
-          max: stats?.max?.inMilliseconds ?? 0,
-          loss: result.packetLoss.round(),
-        );
-      });
-
-    } catch (e) {
-      debugPrint(
-        'ICMP Error (${target.routeAddress}): $e',
-      );
-
-      if (!mounted) return;
-
-      setState(() {
-        final index = _targets.indexWhere(
-              (item) => item.routeAddress == target.routeAddress,
-        );
-
-        if (index == -1) return;
-
-        _targets[index] = _targets[index].copyWith(
-          min: 0,
-          avg: 0,
-          max: 0,
-          loss: 100,
-        );
-      });
-    }
-  }
-
-
-// Run ICMP tests for every server concurrently.
-  Future<void> _runIcmpTestForTargets(List<_PingTarget> targets) async {
-    if (_isTestingIcmp || targets.isEmpty) return;
-
-    setState(() {
-      _isTestingIcmp = true;
-      // Every result starts from zero and is replaced as its ping finishes.
-      _targets = _targets
-          .map((target) => target.copyWith(min: 0, avg: 0, max: 0, loss: 0))
-          .toList();
-    });
-
-    try {
-      await Future.wait(targets.map(_testTarget));
-    } finally {
-      if (mounted) {
-        setState(() {
-          _isTestingIcmp = false;
-        });
-      }
-    }
-  }
-
-  Future<void> _startAllIcmpTest() async {
-    if (_isTestingIcmp) return;
-
-    if (_targets.isEmpty) {
+    if (vm.targets.isEmpty) {
       ScaffoldMessenger.of(context)
         ..hideCurrentSnackBar()
         ..showSnackBar(
           const SnackBar(
-            content: Text('No servers are available to test.'),
-            backgroundColor: _Palette.vulcanDark,
+            content: Text(
+              'No servers are available to test.',
+              textAlign: TextAlign.center,
+            ),
+            backgroundColor: Color(0xFF0E121B),
             behavior: SnackBarBehavior.floating,
           ),
         );
       return;
     }
 
-    final targetsToTest = List<_PingTarget>.from(_targets);
-    await _runIcmpTestForTargets(targetsToTest);
+    await vm.testAllTargets();
 
-    if (!mounted) return;
+    if (!context.mounted) return;
 
-    final failedCount = _targets.where((target) => target.loss >= 100).length;
-    final successfulCount = _targets.length - failedCount;
+    final failedCount =
+        vm.targets.where((target) => target.loss >= 100).length;
+
+    final successfulCount = vm.targets.length - failedCount;
 
     ScaffoldMessenger.of(context)
       ..hideCurrentSnackBar()
@@ -292,159 +106,129 @@ class _IcmpScreenState extends State<IcmpScreen> {
           content: Text(
             'ICMP finished: $successfulCount succeeded, $failedCount failed.',
             textAlign: TextAlign.center,
-            style: const TextStyle(color: _Palette.white),
+            style: const TextStyle(
+              color: Color(0xFFF1F5F9),
+            ),
           ),
-          backgroundColor: _Palette.vulcanDark,
+          backgroundColor: const Color(0xFF0E121B),
           behavior: SnackBarBehavior.floating,
         ),
       );
   }
 
   @override
-  void initState() {
-    super.initState();
-    _fetchTargets();
-  }
-
-  _PingFilter _filter = _PingFilter.all;
-  _SortMetric _sortMetric = _SortMetric.avg;
-  bool _ascending = true;
-
-  List<_PingTarget> get _visibleTargets {
-    final result = _targets.where((target) {
-      switch (_filter) {
-        case _PingFilter.all:
-          return true;
-        case _PingFilter.relay:
-          return target.isRelay;
-        case _PingFilter.direct:
-          return !target.isRelay;
-      }
-    }).toList();
-
-    int valueOf(_PingTarget target) {
-      switch (_sortMetric) {
-        case _SortMetric.avg:
-          return target.avg;
-        case _SortMetric.min:
-          return target.min;
-        case _SortMetric.loss:
-          return target.loss;
-      }
-    }
-
-    result.sort((a, b) {
-      final comparison = valueOf(a).compareTo(valueOf(b));
-      return _ascending ? comparison : -comparison;
-    });
-    return result;
-  }
-
-  int _averagePingFor(bool Function(_PingTarget target) predicate) {
-    final measured = _targets.where(
-          (target) => predicate(target) && target.avg > 0 && target.loss < 100,
-    );
-    if (measured.isEmpty) return 0;
-
-    final total = measured.fold<int>(0, (sum, target) => sum + target.avg);
-    return (total / measured.length).round();
-  }
-
-  int get _relayAverage =>
-      _averagePingFor((target) => target.isRelay);
-
-  int get _directAverage =>
-      _averagePingFor((target) => !target.isRelay);
-
-  _PingTarget? get _bestTarget {
-    final measured = _targets.where(
-          (target) => target.avg > 0 && target.loss < 100,
-    );
-    if (measured.isEmpty) return null;
-
-    return measured.reduce(
-          (best, current) => current.avg < best.avg ? current : best,
-    );
-  }
-
-  String get _bestTargetLabel {
-    final best = _bestTarget;
-    if (best == null) return 'Best: -- (0 ms)';
-    return 'Best: ${best.countryCode} (${best.avg} ms)';
-  }
-
-  @override
   Widget build(BuildContext context) {
+    return Consumer<IcmpViewModel>(
+      builder: (context, vm, child) {
+        return _buildContent(context, vm);
+      },
+    );
+  }
+
+  Widget _buildContent(BuildContext context, IcmpViewModel vm) {
     return ColoredBox(
       color: _Palette.bunker,
       child: LayoutBuilder(
         builder: (context, constraints) {
-          // The source design is 392 px wide, with a 10 px outer frame on
-          // each side. The content area is therefore capped at 372 px.
-          final contentWidth = constraints.maxWidth < 372
-              ? constraints.maxWidth
-              : 372.0;
-
           return Center(
             child: SizedBox(
-              width: contentWidth,
+              width: constraints.maxWidth > 372
+                  ? 372
+                  : constraints.maxWidth,
               child: SingleChildScrollView(
-                physics: const BouncingScrollPhysics(),
-                padding: const EdgeInsets.fromLTRB(14, 4, 14, 16),
+                padding: const EdgeInsets.fromLTRB(16, 16, 16, 24),
                 child: Column(
                   crossAxisAlignment: CrossAxisAlignment.stretch,
                   children: [
+                    // Summary card
                     _PingSummaryCard(
-                      isTesting: _isTestingIcmp,
-                      serverCount: _targets.length,
-                      bestLabel: _bestTargetLabel,
-                      relayAverage: _relayAverage,
-                      directAverage: _directAverage,
-                      onTestPressed: _startAllIcmpTest,
+                      isTesting: vm.isTestingIcmp,
+                      serverCount: vm.targets.length,
+                      bestLabel: vm.bestTargetLabel,
+                      relayAverage: vm.relayAverage.round(),
+                      directAverage: vm.directAverage.round(),
+                      onTestPressed: () => _startIcmpTest(context, vm),
                     ),
-                    const SizedBox(height: 12),
-                    if (_isLoadingTargets)
+
+                    const SizedBox(height: 16),
+
+                    // Loading state
+                    if (vm.isLoadingTargets)
                       const Padding(
-                        padding: EdgeInsets.symmetric(vertical: 24),
+                        padding: EdgeInsets.symmetric(vertical: 40),
                         child: Center(
                           child: CircularProgressIndicator(
                             color: _Palette.green,
+                            strokeWidth: 2.5,
                           ),
                         ),
                       )
-                    else if (_targetsError != null)
-                      Padding(
-                        padding: const EdgeInsets.symmetric(vertical: 18),
+
+                    // Error state
+                    else if (vm.errorMessage != null)
+                      Container(
+                        width: double.infinity,
+                        padding: const EdgeInsets.all(20),
+                        decoration: BoxDecoration(
+                          color: _Palette.vulcan,
+                          border: Border.all(
+                            color: _Palette.red.withValues(alpha: 0.4),
+                          ),
+                          borderRadius: BorderRadius.circular(20),
+                        ),
                         child: Column(
                           children: [
+                            const Icon(
+                              Icons.error_outline_rounded,
+                              color: _Palette.red,
+                              size: 30,
+                            ),
+                            const SizedBox(height: 10),
+                            const Text(
+                              'Failed to load servers',
+                              style: TextStyle(
+                                color: _Palette.white,
+                                fontSize: 14,
+                                fontWeight: FontWeight.w600,
+                              ),
+                            ),
+                            const SizedBox(height: 6),
                             Text(
-                              'Could not load servers: $_targetsError',
+                              vm.errorMessage!,
                               textAlign: TextAlign.center,
                               style: const TextStyle(
-                                color: _Palette.red,
+                                color: _Palette.muted,
                                 fontSize: 11,
                               ),
                             ),
-                            const SizedBox(height: 10),
-                            OutlinedButton(
-                              onPressed: _fetchTargets,
-                              child: const Text('Retry'),
+                            const SizedBox(height: 14),
+                            ElevatedButton.icon(
+                              onPressed: vm.fetchTargets,
+                              icon: const Icon(
+                                Icons.refresh_rounded,
+                                size: 16,
+                              ),
+                              label: const Text('Try Again'),
+                              style: ElevatedButton.styleFrom(
+                                backgroundColor: _Palette.green,
+                                foregroundColor: _Palette.blackPearl,
+                                elevation: 0,
+                              ),
                             ),
                           ],
                         ),
                       )
+
+                    // Server results
                     else
                       _ResultsPanel(
-                        filter: _filter,
-                        sortMetric: _sortMetric,
-                        ascending: _ascending,
-                        targets: _visibleTargets,
-                        onFilterChanged: (value) =>
-                            setState(() => _filter = value),
-                        onSortMetricChanged: (value) =>
-                            setState(() => _sortMetric = value),
-                        onDirectionPressed: () =>
-                            setState(() => _ascending = !_ascending),
+                        filter: vm.filter,
+                        sortMetric: vm.sortMetric,
+                        ascending: vm.ascending,
+                        targets: vm.visibleTargets,
+                        onFilterChanged: vm.setFilter,
+                        onSortMetricChanged: vm.setSortMetric,
+                        onDirectionPressed: vm.toggleSortDirection,
                       ),
                   ],
                 ),
@@ -659,12 +443,12 @@ class _ResultsPanel extends StatelessWidget {
     required this.onDirectionPressed,
   });
 
-  final _PingFilter filter;
-  final _SortMetric sortMetric;
+  final PingFilter filter;
+  final SortMetric sortMetric;
   final bool ascending;
-  final List<_PingTarget> targets;
-  final ValueChanged<_PingFilter> onFilterChanged;
-  final ValueChanged<_SortMetric> onSortMetricChanged;
+  final List<PingTarget> targets;
+  final ValueChanged<PingFilter> onFilterChanged;
+  final ValueChanged<SortMetric> onSortMetricChanged;
   final VoidCallback onDirectionPressed;
 
   @override
@@ -693,22 +477,22 @@ class _ResultsPanel extends StatelessWidget {
                       _MetricFilter(
                         label: 'Avg Ping',
                         width: 67,
-                        selected: sortMetric == _SortMetric.avg,
-                        onTap: () => onSortMetricChanged(_SortMetric.avg),
+                        selected: sortMetric == SortMetric.avg,
+                        onTap: () => onSortMetricChanged(SortMetric.avg),
                       ),
                       const SizedBox(width: 4),
                       _MetricFilter(
                         label: 'Min Ping',
                         width: 66,
-                        selected: sortMetric == _SortMetric.min,
-                        onTap: () => onSortMetricChanged(_SortMetric.min),
+                        selected: sortMetric == SortMetric.min,
+                        onTap: () => onSortMetricChanged(SortMetric.min),
                       ),
                       const SizedBox(width: 4),
                       _MetricFilter(
                         label: 'Loss',
                         width: 46,
-                        selected: sortMetric == _SortMetric.loss,
-                        onTap: () => onSortMetricChanged(_SortMetric.loss),
+                        selected: sortMetric == SortMetric.loss,
+                        onTap: () => onSortMetricChanged(SortMetric.loss),
                       ),
                     ],
                   ),
@@ -749,8 +533,8 @@ class _ResultsPanel extends StatelessWidget {
 class _FilterTabs extends StatelessWidget {
   const _FilterTabs({required this.selected, required this.onChanged});
 
-  final _PingFilter selected;
-  final ValueChanged<_PingFilter> onChanged;
+  final PingFilter selected;
+  final ValueChanged<PingFilter> onChanged;
 
   @override
   Widget build(BuildContext context) {
@@ -766,18 +550,18 @@ class _FilterTabs extends StatelessWidget {
         children: [
           _FilterTab(
             label: 'All',
-            selected: selected == _PingFilter.all,
-            onTap: () => onChanged(_PingFilter.all),
+            selected: selected == PingFilter.all,
+            onTap: () => onChanged(PingFilter.all),
           ),
           _FilterTab(
             label: 'Relay',
-            selected: selected == _PingFilter.relay,
-            onTap: () => onChanged(_PingFilter.relay),
+            selected: selected == PingFilter.relay,
+            onTap: () => onChanged(PingFilter.relay),
           ),
           _FilterTab(
             label: 'Direct',
-            selected: selected == _PingFilter.direct,
-            onTap: () => onChanged(_PingFilter.direct),
+            selected: selected == PingFilter.direct,
+            onTap: () => onChanged(PingFilter.direct),
           ),
         ],
       ),
@@ -925,7 +709,7 @@ class _SortDirectionButton extends StatelessWidget {
 class _ServerResultCard extends StatelessWidget {
   const _ServerResultCard({required this.target});
 
-  final _PingTarget target;
+  final PingTarget target;
 
   @override
   Widget build(BuildContext context) {

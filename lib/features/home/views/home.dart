@@ -4,7 +4,7 @@ import 'package:dart_ping/dart_ping.dart';
 import 'package:dio/dio.dart';
 import 'package:flutter/material.dart';
 import 'package:wireguard_flutter_plus/wireguard_flutter_plus.dart';
-import '../../theme/app_colors.dart';
+import 'package:my_app/core/theme/app_colors.dart';
 
 class ServerConfig {
   final int id;

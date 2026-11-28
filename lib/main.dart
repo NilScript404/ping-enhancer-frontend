@@ -1,10 +1,10 @@
 import 'package:flutter/material.dart';
 
-import 'theme/app_colors.dart';
-import 'theme/app_theme.dart';
-import 'widgets/top_bar/top_bar.dart';
-import 'widgets/home/home.dart' as home;
-import 'widgets/icmp/icmp.dart' as icmp;
+import 'core/theme/app_colors.dart';
+import 'core/theme/app_theme.dart';
+import 'core/widgets/top_bar/top_bar.dart';
+import 'features/home/views/home.dart' as home;
+import 'features//icmp/views/icmp.dart' as icmp;
 
 void main() {
   runApp(const PingEnhancer());
